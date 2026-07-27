@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -24,12 +27,17 @@ class MainWindow(QMainWindow):
         self.resize(1280, 760)
         self.setMinimumSize(1000, 620)
 
+        self._selected_folder: Path | None = None
+
         self._sidebar = Sidebar()
         self._file_table = FileTable()
 
         self._page_title = QLabel("All Files")
         self._folder_path_input = QLineEdit()
         self._search_input = QLineEdit()
+
+        self._choose_folder_button = QPushButton("Choose Folder")
+        self._scan_button = QPushButton("Scan Folder")
 
         self._build_ui()
         self._connect_signals()
@@ -65,8 +73,8 @@ class MainWindow(QMainWindow):
 
     def _build_header(self) -> QWidget:
         container = QWidget()
-        layout = QVBoxLayout(container)
 
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
@@ -101,17 +109,20 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Fixed,
         )
 
-        choose_button = QPushButton("Choose Folder")
-        choose_button.setObjectName("secondaryButton")
-        choose_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._choose_folder_button.setObjectName("secondaryButton")
+        self._choose_folder_button.setCursor(
+            Qt.CursorShape.PointingHandCursor
+        )
 
-        scan_button = QPushButton("Scan Folder")
-        scan_button.setObjectName("primaryButton")
-        scan_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._scan_button.setObjectName("primaryButton")
+        self._scan_button.setCursor(
+            Qt.CursorShape.PointingHandCursor
+        )
+        self._scan_button.setEnabled(False)
 
         layout.addWidget(self._folder_path_input)
-        layout.addWidget(choose_button)
-        layout.addWidget(scan_button)
+        layout.addWidget(self._choose_folder_button)
+        layout.addWidget(self._scan_button)
 
         return card
 
@@ -139,10 +150,44 @@ class MainWindow(QMainWindow):
         status_bar = QStatusBar()
         status_bar.setObjectName("statusBar")
         status_bar.showMessage("Ready")
+
         self.setStatusBar(status_bar)
 
     def _connect_signals(self) -> None:
-        self._sidebar.page_selected.connect(self._handle_page_selected)
+        self._sidebar.page_selected.connect(
+            self._handle_page_selected
+        )
+        self._choose_folder_button.clicked.connect(
+            self._choose_folder
+        )
+
+    def _choose_folder(self) -> None:
+        initial_directory = (
+            str(self._selected_folder)
+            if self._selected_folder is not None
+            else str(Path.home())
+        )
+
+        selected_path = QFileDialog.getExistingDirectory(
+            self,
+            "Choose a folder to scan",
+            initial_directory,
+            QFileDialog.Option.ShowDirsOnly,
+        )
+
+        if not selected_path:
+            return
+
+        folder = Path(selected_path)
+
+        self._selected_folder = folder
+        self._folder_path_input.setText(str(folder))
+        self._folder_path_input.setToolTip(str(folder))
+        self._scan_button.setEnabled(True)
+
+        self.statusBar().showMessage(
+            f"Selected folder: {folder.name}"
+        )
 
     def _handle_page_selected(self, page_name: str) -> None:
         page_titles = {

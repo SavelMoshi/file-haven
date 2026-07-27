@@ -116,6 +116,12 @@ QPushButton#secondaryButton:hover {
     border-color: #4B5262;
 }
 
+QPushButton:disabled {
+    background-color: #2A2E37;
+    border-color: #30343E;
+    color: #666D7A;
+}
+
 QTableWidget#fileTable {
     border: 1px solid #292D36;
     border-radius: 10px;
