@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QThread, Qt
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -15,8 +15,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from file_haven.domain import FileRecord
 from file_haven.presentation.widgets.file_table import FileTable
 from file_haven.presentation.widgets.sidebar import Sidebar
+from file_haven.presentation.workers.scan_worker import ScanWorker
 
 
 class MainWindow(QMainWindow):
@@ -28,6 +30,10 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1000, 620)
 
         self._selected_folder: Path | None = None
+        self._scan_thread: QThread | None = None
+        self._scan_worker: ScanWorker | None = None
+        self._scan_file_count = 0
+        self._scan_cancel_requested = False
 
         self._sidebar = Sidebar()
         self._file_table = FileTable()
@@ -38,6 +44,7 @@ class MainWindow(QMainWindow):
 
         self._choose_folder_button = QPushButton("Choose Folder")
         self._scan_button = QPushButton("Scan Folder")
+        self._cancel_button = QPushButton("Cancel")
 
         self._build_ui()
         self._connect_signals()
@@ -81,9 +88,7 @@ class MainWindow(QMainWindow):
         title = QLabel("File Haven")
         title.setObjectName("appTitle")
 
-        subtitle = QLabel(
-            "Find clutter, review files, and clean folders safely."
-        )
+        subtitle = QLabel("Find clutter, review files, and clean folders safely.")
         subtitle.setObjectName("appSubtitle")
 
         layout.addWidget(title)
@@ -100,9 +105,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         self._folder_path_input.setObjectName("folderPathInput")
-        self._folder_path_input.setPlaceholderText(
-            "Choose a folder to scan"
-        )
+        self._folder_path_input.setPlaceholderText("Choose a folder to scan")
         self._folder_path_input.setReadOnly(True)
         self._folder_path_input.setSizePolicy(
             QSizePolicy.Policy.Expanding,
@@ -110,19 +113,20 @@ class MainWindow(QMainWindow):
         )
 
         self._choose_folder_button.setObjectName("secondaryButton")
-        self._choose_folder_button.setCursor(
-            Qt.CursorShape.PointingHandCursor
-        )
+        self._choose_folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self._scan_button.setObjectName("primaryButton")
-        self._scan_button.setCursor(
-            Qt.CursorShape.PointingHandCursor
-        )
+        self._scan_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._scan_button.setEnabled(False)
+
+        self._cancel_button.setObjectName("dangerButton")
+        self._cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cancel_button.setEnabled(False)
 
         layout.addWidget(self._folder_path_input)
         layout.addWidget(self._choose_folder_button)
         layout.addWidget(self._scan_button)
+        layout.addWidget(self._cancel_button)
 
         return card
 
@@ -154,18 +158,14 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status_bar)
 
     def _connect_signals(self) -> None:
-        self._sidebar.page_selected.connect(
-            self._handle_page_selected
-        )
-        self._choose_folder_button.clicked.connect(
-            self._choose_folder
-        )
+        self._sidebar.page_selected.connect(self._handle_page_selected)
+        self._choose_folder_button.clicked.connect(self._choose_folder)
+        self._scan_button.clicked.connect(self._start_scan)
+        self._cancel_button.clicked.connect(self._cancel_scan)
 
     def _choose_folder(self) -> None:
         initial_directory = (
-            str(self._selected_folder)
-            if self._selected_folder is not None
-            else str(Path.home())
+            str(self._selected_folder) if self._selected_folder is not None else str(Path.home())
         )
 
         selected_path = QFileDialog.getExistingDirectory(
@@ -185,9 +185,96 @@ class MainWindow(QMainWindow):
         self._folder_path_input.setToolTip(str(folder))
         self._scan_button.setEnabled(True)
 
-        self.statusBar().showMessage(
-            f"Selected folder: {folder.name}"
-        )
+        self.statusBar().showMessage(f"Selected folder: {folder.name}")
+
+    def _start_scan(self) -> None:
+        if self._selected_folder is None:
+            return
+
+        if self._scan_thread is not None:
+            return
+
+        self._scan_file_count = 0
+        self._scan_cancel_requested = False
+        self._file_table.clear_files()
+
+        self._choose_folder_button.setEnabled(False)
+        self._scan_button.setEnabled(False)
+        self._scan_button.setText("Scanning...")
+        self._cancel_button.setEnabled(True)
+
+        self.statusBar().showMessage("Scanning folder...")
+
+        self._scan_thread = QThread(self)
+        self._scan_worker = ScanWorker(self._selected_folder)
+
+        self._scan_worker.moveToThread(self._scan_thread)
+
+        self._scan_thread.started.connect(self._scan_worker.run)
+
+        self._scan_worker.file_found.connect(self._handle_file_found)
+        self._scan_worker.progress_updated.connect(self._handle_scan_progress)
+        self._scan_worker.finished.connect(self._handle_scan_finished)
+        self._scan_worker.failed.connect(self._handle_scan_failed)
+        self._scan_worker.cancelled.connect(self._handle_scan_cancelled)
+
+        self._scan_worker.finished.connect(self._scan_worker.deleteLater)
+        self._scan_worker.failed.connect(self._scan_worker.deleteLater)
+        self._scan_worker.cancelled.connect(self._scan_worker.deleteLater)
+
+        self._scan_worker.finished.connect(self._scan_thread.quit)
+        self._scan_worker.failed.connect(self._scan_thread.quit)
+        self._scan_worker.cancelled.connect(self._scan_thread.quit)
+
+        self._scan_thread.finished.connect(self._scan_thread.deleteLater)
+        self._scan_thread.finished.connect(self._cleanup_scan)
+
+        self._scan_thread.start()
+
+    def _handle_file_found(self, record: FileRecord) -> None:
+        if self._scan_cancel_requested:
+            return
+
+        self._scan_file_count += 1
+        self._file_table.add_file(record)
+
+    def _handle_scan_progress(self, file_count: int) -> None:
+        if self._scan_cancel_requested:
+            return
+
+        self.statusBar().showMessage(f"Scanning... {file_count:,} files found")
+
+    def _handle_scan_finished(self) -> None:
+        self.statusBar().showMessage(f"Scan complete — {self._scan_file_count:,} files found")
+
+    def _handle_scan_failed(self, message: str) -> None:
+        self.statusBar().showMessage(f"Scan failed: {message}")
+
+    def _handle_scan_cancelled(self) -> None:
+        self.statusBar().showMessage(f"Scan cancelled — {self._scan_file_count:,} files found")
+
+    def _cleanup_scan(self) -> None:
+        self._scan_worker = None
+        self._scan_thread = None
+        self._scan_cancel_requested = False
+
+        self._choose_folder_button.setEnabled(True)
+        self._scan_button.setEnabled(self._selected_folder is not None)
+        self._scan_button.setText("Scan Folder")
+        self._cancel_button.setEnabled(False)
+
+    def _cancel_scan(self) -> None:
+        if self._scan_worker is None:
+            return
+
+        self._scan_cancel_requested = True
+
+        self._cancel_button.setEnabled(False)
+        self._scan_button.setText("Cancelling...")
+
+        self.statusBar().showMessage(f"Cancelling scan... {self._scan_file_count:,} files found")
+
+        self._scan_worker.request_cancel()
 
     def _handle_page_selected(self, page_name: str) -> None:
         page_titles = {
@@ -198,6 +285,4 @@ class MainWindow(QMainWindow):
             "history": "Scan History",
         }
 
-        self._page_title.setText(
-            page_titles.get(page_name, "All Files")
-        )
+        self._page_title.setText(page_titles.get(page_name, "All Files"))

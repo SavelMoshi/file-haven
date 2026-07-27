@@ -34,9 +34,7 @@ class Sidebar(QWidget):
         button = QPushButton(text)
         button.setObjectName("sidebarButton")
         button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.clicked.connect(
-            lambda checked=False, name=page_name: self._select_page(name)
-        )
+        button.clicked.connect(lambda checked=False, name=page_name: self._select_page(name))
         return button
 
     def _select_page(self, page_name: str) -> None:

@@ -122,6 +122,29 @@ QPushButton:disabled {
     color: #666D7A;
 }
 
+QPushButton#dangerButton {
+    background-color: #DC2626;
+    color: #FFFFFF;
+    border: 1px solid #EF4444;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-weight: 600;
+}
+
+QPushButton#dangerButton:hover {
+    background-color: #EF4444;
+}
+
+QPushButton#dangerButton:pressed {
+    background-color: #B91C1C;
+}
+
+QPushButton#dangerButton:disabled {
+    background-color: #4B2528;
+    color: #9CA3AF;
+    border-color: #5F2D31;
+}
+
 QTableWidget#fileTable {
     border: 1px solid #292D36;
     border-radius: 10px;
