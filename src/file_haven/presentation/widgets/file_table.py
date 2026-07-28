@@ -1,29 +1,15 @@
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QHeaderView,
-    QTableWidget,
-    QTableWidgetItem,
-)
+from collections.abc import Sequence
+
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QPersistentModelIndex, Qt
+from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView
 
 from file_haven.domain import FileRecord
 from file_haven.services import format_file_size
 
-
-class SortableTableItem(QTableWidgetItem):
-    """Sort using a hidden value instead of the displayed text."""
-
-    def __lt__(self, other: "QTableWidgetItem") -> bool:
-        left = self.data(Qt.ItemDataRole.UserRole)
-        right = other.data(Qt.ItemDataRole.UserRole)
-
-        if left is not None and right is not None:
-            return left < right
-
-        return super().__lt__(other)
+INVALID_MODEL_INDEX = QModelIndex()
 
 
-class FileTable(QTableWidget):
+class FileTableModel(QAbstractTableModel):
     HEADERS = [
         "Name",
         "Folder",
@@ -33,10 +19,181 @@ class FileTable(QTableWidget):
     ]
 
     def __init__(self) -> None:
-        super().__init__(0, len(self.HEADERS))
+        super().__init__()
+        self._records: list[FileRecord] = []
+
+    def rowCount(
+        self,
+        parent: QModelIndex | QPersistentModelIndex = INVALID_MODEL_INDEX,
+    ) -> int:
+        if parent.isValid():
+            return 0
+
+        return len(self._records)
+
+    def columnCount(
+        self,
+        parent: QModelIndex | QPersistentModelIndex = INVALID_MODEL_INDEX,
+    ) -> int:
+        if parent.isValid():
+            return 0
+
+        return len(self.HEADERS)
+
+    def data(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+        role: int = Qt.ItemDataRole.DisplayRole,
+    ) -> object:
+        if not index.isValid():
+            return None
+
+        record = self._records[index.row()]
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            return self._display_value(record, index.column())
+
+        if role == Qt.ItemDataRole.UserRole:
+            return record
+
+        return None
+
+    def headerData(
+        self,
+        section: int,
+        orientation: Qt.Orientation,
+        role: int = Qt.ItemDataRole.DisplayRole,
+    ) -> object:
+        if (
+            orientation == Qt.Orientation.Horizontal
+            and role == Qt.ItemDataRole.DisplayRole
+            and 0 <= section < len(self.HEADERS)
+        ):
+            return self.HEADERS[section]
+
+        return super().headerData(section, orientation, role)
+
+    def flags(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> Qt.ItemFlag:
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+
+    def sort(
+        self,
+        column: int,
+        order: Qt.SortOrder = Qt.SortOrder.AscendingOrder,
+    ) -> None:
+        if not 0 <= column < len(self.HEADERS):
+            return
+
+        reverse = order == Qt.SortOrder.DescendingOrder
+
+        self.layoutAboutToBeChanged.emit()
+        self._records.sort(
+            key=lambda record: self._sort_value(record, column),
+            reverse=reverse,
+        )
+        self.layoutChanged.emit()
+
+    def set_files(
+        self,
+        records: Sequence[FileRecord],
+    ) -> None:
+        self.beginResetModel()
+        self._records = list(records)
+        self.endResetModel()
+
+    def add_files(
+        self,
+        records: Sequence[FileRecord],
+    ) -> None:
+        if not records:
+            return
+
+        first_row = len(self._records)
+        last_row = first_row + len(records) - 1
+
+        self.beginInsertRows(QModelIndex(), first_row, last_row)
+        self._records.extend(records)
+        self.endInsertRows()
+
+    def clear_files(self) -> None:
+        self.beginResetModel()
+        self._records.clear()
+        self.endResetModel()
+
+    def file_at(
+        self,
+        row: int,
+    ) -> FileRecord | None:
+        if not 0 <= row < len(self._records):
+            return None
+
+        return self._records[row]
+
+    def records(self) -> list[FileRecord]:
+        return list(self._records)
+
+    def _display_value(
+        self,
+        record: FileRecord,
+        column: int,
+    ) -> str:
+        if column == 0:
+            return record.name
+
+        if column == 1:
+            return str(record.parent_folder)
+
+        if column == 2:
+            return format_file_size(record.size_bytes)
+
+        if column == 3:
+            return record.modified_at.strftime("%Y-%m-%d %H:%M")
+
+        if column == 4:
+            extension = record.extension.removeprefix(".")
+            return extension.upper() if extension else "FILE"
+
+        return ""
+
+    def _sort_value(
+        self,
+        record: FileRecord,
+        column: int,
+    ) -> object:
+        if column == 0:
+            return record.name.casefold()
+
+        if column == 1:
+            return str(record.parent_folder).casefold()
+
+        if column == 2:
+            return record.size_bytes
+
+        if column == 3:
+            return record.modified_at.timestamp()
+
+        if column == 4:
+            return record.extension.casefold()
+
+        return ""
+
+
+class FileTable(QTableView):
+    HEADERS = FileTableModel.HEADERS
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        self._model = FileTableModel()
 
         self.setObjectName("fileTable")
-        self.setHorizontalHeaderLabels(self.HEADERS)
+        self.setModel(self._model)
 
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -73,43 +230,45 @@ class FileTable(QTableWidget):
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-    def add_file(self, record: FileRecord) -> None:
-        sorting = self.isSortingEnabled()
-        self.setSortingEnabled(False)
+    def model(self) -> FileTableModel:
+        return self._model
 
-        row = self.rowCount()
-        self.insertRow(row)
+    def set_files(
+        self,
+        records: Sequence[FileRecord],
+    ) -> None:
+        self._model.set_files(records)
+        self._sort_if_enabled()
 
-        name_item = QTableWidgetItem(record.name)
-        folder_item = QTableWidgetItem(str(record.parent_folder))
+    def add_file(
+        self,
+        record: FileRecord,
+    ) -> None:
+        self.add_files([record])
 
-        size_item = SortableTableItem(format_file_size(record.size_bytes))
-        size_item.setData(
-            Qt.ItemDataRole.UserRole,
-            record.size_bytes,
-        )
-
-        modified_item = SortableTableItem(record.modified_at.strftime("%Y-%m-%d %H:%M"))
-        modified_item.setData(
-            Qt.ItemDataRole.UserRole,
-            record.modified_at.timestamp(),
-        )
-
-        extension = record.extension.removeprefix(".")
-        type_item = QTableWidgetItem(extension.upper() if extension else "FILE")
-
-        name_item.setData(
-            Qt.ItemDataRole.UserRole,
-            str(record.path),
-        )
-
-        self.setItem(row, 0, name_item)
-        self.setItem(row, 1, folder_item)
-        self.setItem(row, 2, size_item)
-        self.setItem(row, 3, modified_item)
-        self.setItem(row, 4, type_item)
-
-        self.setSortingEnabled(sorting)
+    def add_files(
+        self,
+        records: Sequence[FileRecord],
+    ) -> None:
+        self._model.add_files(records)
+        self._sort_if_enabled()
 
     def clear_files(self) -> None:
-        self.setRowCount(0)
+        self._model.clear_files()
+
+    def file_at(
+        self,
+        row: int,
+    ) -> FileRecord | None:
+        return self._model.file_at(row)
+
+    def records(self) -> list[FileRecord]:
+        return self._model.records()
+
+    def _sort_if_enabled(self) -> None:
+        if self.isSortingEnabled():
+            header = self.horizontalHeader()
+            self.sortByColumn(
+                header.sortIndicatorSection(),
+                header.sortIndicatorOrder(),
+            )

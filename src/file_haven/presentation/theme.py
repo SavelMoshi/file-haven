@@ -145,7 +145,7 @@ QPushButton#dangerButton:disabled {
     border-color: #5F2D31;
 }
 
-QTableWidget#fileTable {
+QTableView#fileTable {
     border: 1px solid #292D36;
     border-radius: 10px;
     background-color: #181B22;
@@ -155,13 +155,13 @@ QTableWidget#fileTable {
     outline: none;
 }
 
-QTableWidget#fileTable::item {
+QTableView#fileTable::item {
     min-height: 42px;
     padding: 8px;
     border-bottom: 1px solid #252932;
 }
 
-QTableWidget#fileTable::item:selected {
+QTableView#fileTable::item:selected {
     background-color: #303A58;
     color: #FFFFFF;
 }

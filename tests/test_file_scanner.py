@@ -40,4 +40,4 @@ def test_scanner_raises_for_missing_folder() -> None:
     except FileNotFoundError:
         return
 
-    assert False
+    raise AssertionError("Expected scanner to raise FileNotFoundError")

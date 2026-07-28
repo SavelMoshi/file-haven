@@ -1,6 +1,7 @@
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt
+from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -15,10 +16,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from file_haven.domain import FileRecord
+from file_haven.constants import (
+    LARGE_FILE_THRESHOLD_MB,
+    OLD_FILE_THRESHOLD_DAYS,
+)
+from file_haven.domain import FileRecord, ScanHistoryRecord
+from file_haven.infrastructure import ScanHistoryRepository
 from file_haven.presentation.widgets.file_table import FileTable
+from file_haven.presentation.widgets.history_table import HistoryTable
 from file_haven.presentation.widgets.sidebar import Sidebar
 from file_haven.presentation.workers.scan_worker import ScanWorker
+
+MAX_DISPLAYED_FILES = 5_000
 
 
 class MainWindow(QMainWindow):
@@ -33,10 +42,20 @@ class MainWindow(QMainWindow):
         self._scan_thread: QThread | None = None
         self._scan_worker: ScanWorker | None = None
         self._scan_file_count = 0
+        self._scan_results: list[FileRecord] = []
+        self._current_page = "all_files"
         self._scan_cancel_requested = False
 
         self._sidebar = Sidebar()
         self._file_table = FileTable()
+
+        self._history_table = HistoryTable()
+        self._history_table.hide()
+
+        data_directory = Path.home() / ".file_haven"
+        data_directory.mkdir(parents=True, exist_ok=True)
+
+        self._history_repository = ScanHistoryRepository(data_directory / "file_haven.db")
 
         self._page_title = QLabel("All Files")
         self._folder_path_input = QLineEdit()
@@ -75,6 +94,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_folder_controls())
         layout.addWidget(self._build_results_header())
         layout.addWidget(self._file_table)
+        layout.addWidget(self._history_table)
 
         return content
 
@@ -162,6 +182,7 @@ class MainWindow(QMainWindow):
         self._choose_folder_button.clicked.connect(self._choose_folder)
         self._scan_button.clicked.connect(self._start_scan)
         self._cancel_button.clicked.connect(self._cancel_scan)
+        self._search_input.textChanged.connect(self._refresh_current_view)
 
     def _choose_folder(self) -> None:
         initial_directory = (
@@ -195,6 +216,7 @@ class MainWindow(QMainWindow):
             return
 
         self._scan_file_count = 0
+        self._scan_results.clear()
         self._scan_cancel_requested = False
         self._file_table.clear_files()
 
@@ -212,7 +234,7 @@ class MainWindow(QMainWindow):
 
         self._scan_thread.started.connect(self._scan_worker.run)
 
-        self._scan_worker.file_found.connect(self._handle_file_found)
+        self._scan_worker.files_found.connect(self._handle_files_found)
         self._scan_worker.progress_updated.connect(self._handle_scan_progress)
         self._scan_worker.finished.connect(self._handle_scan_finished)
         self._scan_worker.failed.connect(self._handle_scan_failed)
@@ -228,15 +250,19 @@ class MainWindow(QMainWindow):
 
         self._scan_thread.finished.connect(self._scan_thread.deleteLater)
         self._scan_thread.finished.connect(self._cleanup_scan)
+        self._file_table.setSortingEnabled(False)
 
         self._scan_thread.start()
 
-    def _handle_file_found(self, record: FileRecord) -> None:
+    def _handle_files_found(
+        self,
+        records: list[FileRecord],
+    ) -> None:
         if self._scan_cancel_requested:
             return
 
-        self._scan_file_count += 1
-        self._file_table.add_file(record)
+        self._scan_results.extend(records)
+        self._scan_file_count += len(records)
 
     def _handle_scan_progress(self, file_count: int) -> None:
         if self._scan_cancel_requested:
@@ -245,6 +271,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Scanning... {file_count:,} files found")
 
     def _handle_scan_finished(self) -> None:
+        if self._selected_folder is not None:
+            history_record = ScanHistoryRecord(
+                folder=self._selected_folder,
+                file_count=self._scan_file_count,
+                scanned_at=datetime.now(),
+            )
+
+            self._history_repository.add(history_record)
+
+        self._refresh_current_view()
+
         self.statusBar().showMessage(f"Scan complete — {self._scan_file_count:,} files found")
 
     def _handle_scan_failed(self, message: str) -> None:
@@ -257,6 +294,7 @@ class MainWindow(QMainWindow):
         self._scan_worker = None
         self._scan_thread = None
         self._scan_cancel_requested = False
+        self._file_table.setSortingEnabled(True)
 
         self._choose_folder_button.setEnabled(True)
         self._scan_button.setEnabled(self._selected_folder is not None)
@@ -276,7 +314,72 @@ class MainWindow(QMainWindow):
 
         self._scan_worker.request_cancel()
 
+    def _show_files(self, records: list[FileRecord]) -> None:
+        displayed_records = records[:MAX_DISPLAYED_FILES]
+
+        self._file_table.set_files(displayed_records)
+
+        if len(records) > MAX_DISPLAYED_FILES:
+            self.statusBar().showMessage(
+                f"Showing {MAX_DISPLAYED_FILES:,} of {len(records):,} files"
+            )
+            return
+
+        self.statusBar().showMessage(f"Showing {len(records):,} files")
+
+    def _refresh_current_view(self) -> None:
+        if self._current_page == "history":
+            self._file_table.hide()
+            self._history_table.show()
+
+            history_records = self._history_repository.get_all()
+            self._history_table.show_records(history_records)
+
+            self.statusBar().showMessage(f"Showing {len(history_records):,} previous scans")
+            return
+
+        self._history_table.hide()
+        self._file_table.show()
+
+        records = self._get_current_page_records()
+
+        search_text = self._search_input.text().strip().lower()
+
+        if search_text:
+            records = [
+                record
+                for record in records
+                if search_text in record.name.lower()
+                or search_text in str(record.parent_folder).lower()
+                or search_text in record.extension.lower()
+            ]
+
+        self._show_files(records)
+
+    def _get_current_page_records(self) -> list[FileRecord]:
+        if self._current_page == "large_files":
+            threshold_bytes = LARGE_FILE_THRESHOLD_MB * 1024 * 1024
+
+            return [record for record in self._scan_results if record.size_bytes >= threshold_bytes]
+
+        if self._current_page == "old_files":
+            return [
+                record
+                for record in self._scan_results
+                if record.age_days >= OLD_FILE_THRESHOLD_DAYS
+            ]
+
+        if self._current_page in {"duplicates"}:
+            return []
+
+        return list(self._scan_results)
+
     def _handle_page_selected(self, page_name: str) -> None:
+        if page_name == "scan_history":
+            page_name = "history"
+
+        self._current_page = page_name
+
         page_titles = {
             "all_files": "All Files",
             "duplicates": "Duplicates",
@@ -286,3 +389,31 @@ class MainWindow(QMainWindow):
         }
 
         self._page_title.setText(page_titles.get(page_name, "All Files"))
+
+        self._refresh_current_view()
+
+        if page_name == "all_files":
+            self._show_files(self._scan_results)
+            return
+
+        if page_name == "large_files":
+            threshold_bytes = LARGE_FILE_THRESHOLD_MB * 1024 * 1024
+
+            large_files = [
+                record for record in self._scan_results if record.size_bytes >= threshold_bytes
+            ]
+
+            self._show_files(large_files)
+            return
+
+        if page_name == "old_files":
+            old_files = [
+                record
+                for record in self._scan_results
+                if record.age_days >= OLD_FILE_THRESHOLD_DAYS
+            ]
+
+            self._show_files(old_files)
+            return
+
+        self._file_table.clear_files()
