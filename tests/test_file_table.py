@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QItemSelectionModel, QSortFilterProxyModel, Qt
 
 from file_haven.domain import FileRecord
 from file_haven.presentation.widgets.file_table import FileTable, FileTableModel
@@ -16,6 +16,20 @@ def _app() -> None:
 
     if application is None:
         QApplication([])
+
+
+def test_model_returns_record_at_row(tmp_path: Path) -> None:
+    record = FileRecord(
+        path=tmp_path / "example.txt",
+        size_bytes=128,
+        modified_at=datetime(2026, 7, 29, 12, 0),
+    )
+
+    model = FileTableModel()
+    model.set_files([record])
+
+    assert model.record_at(0) == record
+    assert model.record_at(999) is None
 
 
 def _record(
@@ -38,6 +52,96 @@ def test_file_table_uses_table_view() -> None:
 
     assert isinstance(table, QTableView)
     assert not isinstance(table, QTableWidget)
+
+
+def test_file_table_selected_records_returns_empty_for_no_selection() -> None:
+    _app()
+    table = FileTable()
+    record = _record("/files/example.txt", 1, datetime(2024, 1, 1, 10, 0))
+
+    table.set_files([record])
+
+    assert table.selected_records() == []
+
+
+def test_file_table_selected_records_returns_selected_record() -> None:
+    _app()
+    table = FileTable()
+    record = _record("/files/example.txt", 1, datetime(2024, 1, 1, 10, 0))
+
+    table.set_files([record])
+    table.selectRow(0)
+
+    assert table.selected_records() == [record]
+
+
+def test_file_table_selected_records_returns_multiple_selected_records() -> None:
+    _app()
+    first = _record("/files/a.txt", 1, datetime(2024, 1, 1, 10, 0))
+    second = _record("/files/b.txt", 2, datetime(2024, 1, 2, 10, 0))
+    third = _record("/files/c.txt", 3, datetime(2024, 1, 3, 10, 0))
+    table = FileTable()
+    table.setSortingEnabled(False)
+
+    table.set_files([first, second, third])
+    selection_model = table.selectionModel()
+
+    assert selection_model is not None
+
+    selection_model.select(
+        table.model().index(0, 0),
+        QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+    )
+    selection_model.select(
+        table.model().index(2, 0),
+        QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+    )
+
+    assert table.selected_records() == [first, third]
+
+
+def test_file_table_selected_records_returns_record_at_sorted_view_row() -> None:
+    _app()
+    small = _record("/files/small.bin", 9, datetime(2024, 1, 1, 10, 0))
+    medium = _record("/files/medium.bin", 100, datetime(2024, 1, 1, 10, 0))
+    large = _record("/files/large.bin", 1000, datetime(2024, 1, 1, 10, 0))
+    table = FileTable()
+
+    table.set_files([small, large, medium])
+    table.sortByColumn(2, Qt.SortOrder.DescendingOrder)
+    table.selectRow(0)
+
+    assert table.selected_records() == [large]
+
+
+def test_file_table_selected_records_maps_proxy_selection_to_source_record() -> None:
+    _app()
+    first = _record("/files/b.txt", 1, datetime(2024, 1, 1, 10, 0))
+    second = _record("/files/a.txt", 2, datetime(2024, 1, 2, 10, 0))
+    table = FileTable()
+    table.setSortingEnabled(False)
+    table.set_files([first, second])
+
+    proxy_model = QSortFilterProxyModel()
+    proxy_model.setSourceModel(table.model())
+    proxy_model.sort(0, Qt.SortOrder.AscendingOrder)
+    table.setModel(proxy_model)
+
+    table.selectRow(0)
+
+    assert table.selected_records() == [second]
+
+
+def test_file_table_selected_records_returns_empty_after_selection_is_invalidated() -> None:
+    _app()
+    table = FileTable()
+    record = _record("/files/example.txt", 1, datetime(2024, 1, 1, 10, 0))
+
+    table.set_files([record])
+    table.selectRow(0)
+    table.clear_files()
+
+    assert table.selected_records() == []
 
 
 def test_model_row_count_and_displayed_data() -> None:

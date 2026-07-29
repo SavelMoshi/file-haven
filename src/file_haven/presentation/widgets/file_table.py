@@ -1,6 +1,12 @@
 from collections.abc import Sequence
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QPersistentModelIndex, Qt
+from PySide6.QtCore import (
+    QAbstractProxyModel,
+    QAbstractTableModel,
+    QModelIndex,
+    QPersistentModelIndex,
+    Qt,
+)
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView
 
 from file_haven.domain import FileRecord
@@ -17,6 +23,12 @@ class FileTableModel(QAbstractTableModel):
         "Modified",
         "Type",
     ]
+
+    def record_at(self, row: int) -> FileRecord | None:
+        if 0 <= row < len(self._records):
+            return self._records[row]
+
+        return None
 
     def __init__(self) -> None:
         super().__init__()
@@ -233,6 +245,22 @@ class FileTable(QTableView):
     def model(self) -> FileTableModel:
         return self._model
 
+    def selected_records(self) -> list[FileRecord]:
+        selection_model = self.selectionModel()
+
+        if selection_model is None:
+            return []
+
+        records: list[FileRecord] = []
+
+        for index in selection_model.selectedRows():
+            record = self._record_for_index(index)
+
+            if record is not None:
+                records.append(record)
+
+        return records
+
     def set_files(
         self,
         records: Sequence[FileRecord],
@@ -264,6 +292,30 @@ class FileTable(QTableView):
 
     def records(self) -> list[FileRecord]:
         return self._model.records()
+
+    def _record_for_index(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> FileRecord | None:
+        if not index.isValid():
+            return None
+
+        source_index = QModelIndex(index)
+        model = source_index.model()
+
+        while isinstance(model, QAbstractProxyModel):
+            source_index = model.mapToSource(source_index)
+            model = source_index.model()
+
+        if model is self._model:
+            return self._model.record_at(source_index.row())
+
+        record = index.data(Qt.ItemDataRole.UserRole)
+
+        if isinstance(record, FileRecord):
+            return record
+
+        return None
 
     def _sort_if_enabled(self) -> None:
         if self.isSortingEnabled():

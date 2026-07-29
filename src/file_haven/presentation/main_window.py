@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QStatusBar,
@@ -26,7 +27,7 @@ from file_haven.presentation.widgets.file_table import FileTable
 from file_haven.presentation.widgets.history_table import HistoryTable
 from file_haven.presentation.widgets.sidebar import Sidebar
 from file_haven.presentation.workers import DuplicateWorker, ScanWorker
-from file_haven.services import format_file_size
+from file_haven.services import FileRevealService, TrashService, format_file_size
 
 MAX_DISPLAYED_FILES = 5_000
 
@@ -71,6 +72,12 @@ class MainWindow(QMainWindow):
         self._choose_folder_button = QPushButton("Choose Folder")
         self._scan_button = QPushButton("Scan Folder")
         self._cancel_button = QPushButton("Cancel")
+
+        self._trash_service = TrashService()
+        self._trash_button = QPushButton("Move to Trash")
+
+        self._file_reveal_service = FileRevealService()
+        self._reveal_button = QPushButton("Reveal in Folder")
 
         self._build_ui()
         self._connect_signals()
@@ -171,9 +178,19 @@ class MainWindow(QMainWindow):
         self._search_input.setClearButtonEnabled(True)
         self._search_input.setMaximumWidth(320)
 
+        self._trash_button.setObjectName("dangerButton")
+        self._trash_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._trash_button.setEnabled(False)
+
+        self._reveal_button.setObjectName("secondaryButton")
+        self._reveal_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reveal_button.setEnabled(False)
+
         layout.addWidget(self._page_title)
         layout.addStretch()
         layout.addWidget(self._search_input)
+        layout.addWidget(self._reveal_button)
+        layout.addWidget(self._trash_button)
 
         return container
 
@@ -190,6 +207,14 @@ class MainWindow(QMainWindow):
         self._scan_button.clicked.connect(self._start_scan)
         self._cancel_button.clicked.connect(self._cancel_scan)
         self._search_input.textChanged.connect(self._refresh_current_view)
+        self._reveal_button.clicked.connect(self._reveal_selected_file)
+
+        self._trash_button.clicked.connect(self._move_selected_to_trash)
+
+        selection_model = self._file_table.selectionModel()
+
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(self._update_file_actions)
 
     def _choose_folder(self) -> None:
         initial_directory = (
@@ -231,6 +256,7 @@ class MainWindow(QMainWindow):
         self._duplicate_analysis_complete = False
         self._scan_cancel_requested = False
         self._file_table.clear_files()
+        self._update_file_actions()
 
         self._choose_folder_button.setEnabled(False)
         self._scan_button.setEnabled(False)
@@ -330,6 +356,7 @@ class MainWindow(QMainWindow):
         displayed_records = records[:MAX_DISPLAYED_FILES]
 
         self._file_table.set_files(displayed_records)
+        self._update_file_actions()
 
         if len(records) > MAX_DISPLAYED_FILES:
             self.statusBar().showMessage(
@@ -349,6 +376,7 @@ class MainWindow(QMainWindow):
         self._cancel_button.setEnabled(False)
 
         self._file_table.clear_files()
+        self._update_file_actions()
         self.statusBar().showMessage("Finding duplicate files...")
 
         self._duplicate_thread = QThread(self)
@@ -412,6 +440,7 @@ class MainWindow(QMainWindow):
             history_records = self._history_repository.get_all()
             self._history_table.show_records(history_records)
 
+            self._update_file_actions()
             self.statusBar().showMessage(f"Showing {len(history_records):,} previous scans")
             return
 
@@ -421,6 +450,7 @@ class MainWindow(QMainWindow):
 
             if not self._scan_results:
                 self._file_table.clear_files()
+                self._update_file_actions()
                 self.statusBar().showMessage("Scan a folder before finding duplicates")
                 return
 
@@ -481,6 +511,103 @@ class MainWindow(QMainWindow):
             ]
 
         return list(self._scan_results)
+
+    def _update_file_actions(self, *_: object) -> None:
+        has_selection = bool(self._file_table.selected_records())
+
+        background_job_running = self._scan_thread is not None or self._duplicate_thread is not None
+
+        self._trash_button.setEnabled(
+            has_selection and self._current_page != "history" and not background_job_running
+        )
+
+        self._reveal_button.setEnabled(
+            has_selection and self._current_page != "history" and not background_job_running
+        )
+
+    def _reveal_selected_file(self) -> None:
+        records = self._file_table.selected_records()
+
+        if not records:
+            return
+
+        record = records[0]
+
+        if self._file_reveal_service.reveal(record.path):
+            self.statusBar().showMessage(f"Revealed {record.name}")
+            return
+
+        QMessageBox.warning(
+            self,
+            "Unable to Reveal File",
+            "The selected file could not be found or opened.",
+        )
+
+    def _move_selected_to_trash(self) -> None:
+        records = self._file_table.selected_records()
+
+        if not records:
+            return
+
+        file_count = len(records)
+        file_word = "file" if file_count == 1 else "files"
+
+        response = QMessageBox.warning(
+            self,
+            "Move to Trash",
+            (
+                f"Move {file_count:,} selected {file_word} "
+                "to the Trash?\n\n"
+                "You can restore them from the system Trash."
+            ),
+            (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
+            QMessageBox.StandardButton.No,
+        )
+
+        if response != QMessageBox.StandardButton.Yes:
+            return
+
+        result = self._trash_service.move_files(record.path for record in records)
+
+        moved_paths = set(result.moved)
+
+        if moved_paths:
+            self._scan_results = [
+                record for record in self._scan_results if record.path not in moved_paths
+            ]
+
+            updated_groups: list[DuplicateGroup] = []
+
+            for group in self._duplicate_groups:
+                remaining_files = tuple(
+                    record for record in group.files if record.path not in moved_paths
+                )
+
+                if len(remaining_files) >= 2:
+                    updated_groups.append(
+                        DuplicateGroup(
+                            fingerprint=group.fingerprint,
+                            files=remaining_files,
+                        )
+                    )
+
+            self._duplicate_groups = updated_groups
+            self._refresh_current_view()
+
+        self._update_file_actions()
+
+        if result.failed:
+            QMessageBox.warning(
+                self,
+                "Some Files Were Not Moved",
+                (
+                    f"Moved {len(result.moved):,} files.\n"
+                    f"Failed to move {len(result.failed):,} files."
+                ),
+            )
+            return
+
+        self.statusBar().showMessage(f"Moved {len(result.moved):,} files to Trash")
 
     def _handle_page_selected(self, page_name: str) -> None:
         if page_name == "scan_history":
