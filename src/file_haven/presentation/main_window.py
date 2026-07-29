@@ -20,12 +20,13 @@ from file_haven.constants import (
     LARGE_FILE_THRESHOLD_MB,
     OLD_FILE_THRESHOLD_DAYS,
 )
-from file_haven.domain import FileRecord, ScanHistoryRecord
+from file_haven.domain import DuplicateGroup, FileRecord, ScanHistoryRecord
 from file_haven.infrastructure import ScanHistoryRepository
 from file_haven.presentation.widgets.file_table import FileTable
 from file_haven.presentation.widgets.history_table import HistoryTable
 from file_haven.presentation.widgets.sidebar import Sidebar
-from file_haven.presentation.workers.scan_worker import ScanWorker
+from file_haven.presentation.workers import DuplicateWorker, ScanWorker
+from file_haven.services import format_file_size
 
 MAX_DISPLAYED_FILES = 5_000
 
@@ -43,6 +44,12 @@ class MainWindow(QMainWindow):
         self._scan_worker: ScanWorker | None = None
         self._scan_file_count = 0
         self._scan_results: list[FileRecord] = []
+
+        self._duplicate_thread: QThread | None = None
+        self._duplicate_worker: DuplicateWorker | None = None
+        self._duplicate_groups: list[DuplicateGroup] = []
+        self._duplicate_analysis_complete = False
+
         self._current_page = "all_files"
         self._scan_cancel_requested = False
 
@@ -209,6 +216,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Selected folder: {folder.name}")
 
     def _start_scan(self) -> None:
+        if self._duplicate_thread is not None:
+            self.statusBar().showMessage("Wait for duplicate analysis to finish")
+            return
         if self._selected_folder is None:
             return
 
@@ -217,6 +227,8 @@ class MainWindow(QMainWindow):
 
         self._scan_file_count = 0
         self._scan_results.clear()
+        self._duplicate_groups.clear()
+        self._duplicate_analysis_complete = False
         self._scan_cancel_requested = False
         self._file_table.clear_files()
 
@@ -327,6 +339,71 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Showing {len(records):,} files")
 
+    def _start_duplicate_analysis(self) -> None:
+        if self._duplicate_thread is not None:
+            self.statusBar().showMessage("Finding duplicate files...")
+            return
+
+        self._choose_folder_button.setEnabled(False)
+        self._scan_button.setEnabled(False)
+        self._cancel_button.setEnabled(False)
+
+        self._file_table.clear_files()
+        self.statusBar().showMessage("Finding duplicate files...")
+
+        self._duplicate_thread = QThread(self)
+        self._duplicate_worker = DuplicateWorker(list(self._scan_results))
+
+        self._duplicate_worker.moveToThread(self._duplicate_thread)
+
+        self._duplicate_thread.started.connect(self._duplicate_worker.run)
+
+        self._duplicate_worker.completed.connect(self._handle_duplicates_completed)
+        self._duplicate_worker.failed.connect(self._handle_duplicates_failed)
+
+        self._duplicate_worker.completed.connect(self._duplicate_worker.deleteLater)
+        self._duplicate_worker.failed.connect(self._duplicate_worker.deleteLater)
+
+        self._duplicate_worker.completed.connect(self._duplicate_thread.quit)
+        self._duplicate_worker.failed.connect(self._duplicate_thread.quit)
+
+        self._duplicate_thread.finished.connect(self._duplicate_thread.deleteLater)
+        self._duplicate_thread.finished.connect(self._cleanup_duplicate_analysis)
+
+        self._duplicate_thread.start()
+
+    def _handle_duplicates_completed(
+        self,
+        groups: list[DuplicateGroup],
+    ) -> None:
+        self._duplicate_groups = groups
+        self._duplicate_analysis_complete = True
+
+        duplicate_file_count = sum(len(group.files) for group in groups)
+        reclaimable_bytes = sum(group.reclaimable_bytes for group in groups)
+
+        if self._current_page == "duplicates":
+            duplicate_records = [record for group in groups for record in group.files]
+
+            self._show_files(duplicate_records)
+
+        self.statusBar().showMessage(
+            f"Found {len(groups):,} duplicate groups — "
+            f"{duplicate_file_count:,} files — "
+            f"{format_file_size(reclaimable_bytes)} reclaimable"
+        )
+
+    def _handle_duplicates_failed(self, message: str) -> None:
+        self.statusBar().showMessage(f"Duplicate detection failed: {message}")
+
+    def _cleanup_duplicate_analysis(self) -> None:
+        self._duplicate_worker = None
+        self._duplicate_thread = None
+
+        self._choose_folder_button.setEnabled(True)
+        self._scan_button.setEnabled(self._selected_folder is not None)
+        self._cancel_button.setEnabled(False)
+
     def _refresh_current_view(self) -> None:
         if self._current_page == "history":
             self._file_table.hide()
@@ -336,6 +413,37 @@ class MainWindow(QMainWindow):
             self._history_table.show_records(history_records)
 
             self.statusBar().showMessage(f"Showing {len(history_records):,} previous scans")
+            return
+
+        if self._current_page == "duplicates":
+            self._history_table.hide()
+            self._file_table.show()
+
+            if not self._scan_results:
+                self._file_table.clear_files()
+                self.statusBar().showMessage("Scan a folder before finding duplicates")
+                return
+
+            if not self._duplicate_analysis_complete:
+                self._start_duplicate_analysis()
+                return
+
+            duplicate_records = [
+                record for group in self._duplicate_groups for record in group.files
+            ]
+
+            search_text = self._search_input.text().strip().lower()
+
+            if search_text:
+                duplicate_records = [
+                    record
+                    for record in duplicate_records
+                    if search_text in record.name.lower()
+                    or search_text in str(record.parent_folder).lower()
+                    or search_text in record.extension.lower()
+                ]
+
+            self._show_files(duplicate_records)
             return
 
         self._history_table.hide()
@@ -357,6 +465,9 @@ class MainWindow(QMainWindow):
         self._show_files(records)
 
     def _get_current_page_records(self) -> list[FileRecord]:
+        if self._current_page == "duplicates":
+            return [record for group in self._duplicate_groups for record in group.files]
+
         if self._current_page == "large_files":
             threshold_bytes = LARGE_FILE_THRESHOLD_MB * 1024 * 1024
 
@@ -368,9 +479,6 @@ class MainWindow(QMainWindow):
                 for record in self._scan_results
                 if record.age_days >= OLD_FILE_THRESHOLD_DAYS
             ]
-
-        if self._current_page in {"duplicates"}:
-            return []
 
         return list(self._scan_results)
 
@@ -391,29 +499,3 @@ class MainWindow(QMainWindow):
         self._page_title.setText(page_titles.get(page_name, "All Files"))
 
         self._refresh_current_view()
-
-        if page_name == "all_files":
-            self._show_files(self._scan_results)
-            return
-
-        if page_name == "large_files":
-            threshold_bytes = LARGE_FILE_THRESHOLD_MB * 1024 * 1024
-
-            large_files = [
-                record for record in self._scan_results if record.size_bytes >= threshold_bytes
-            ]
-
-            self._show_files(large_files)
-            return
-
-        if page_name == "old_files":
-            old_files = [
-                record
-                for record in self._scan_results
-                if record.age_days >= OLD_FILE_THRESHOLD_DAYS
-            ]
-
-            self._show_files(old_files)
-            return
-
-        self._file_table.clear_files()
