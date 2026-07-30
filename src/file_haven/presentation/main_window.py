@@ -2,6 +2,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -66,6 +67,7 @@ class MainWindow(QMainWindow):
         self._history_repository = ScanHistoryRepository(data_directory / "file_haven.db")
 
         self._page_title = QLabel("All Files")
+        self._empty_state_label = QLabel()
         self._folder_path_input = QLineEdit()
         self._search_input = QLineEdit()
 
@@ -81,6 +83,20 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._scan_worker is not None:
+            self._scan_worker.request_cancel()
+
+        if self._scan_thread is not None:
+            self._scan_thread.quit()
+            self._scan_thread.wait(2_000)
+
+        if self._duplicate_thread is not None:
+            self._duplicate_thread.quit()
+            self._duplicate_thread.wait(2_000)
+
+        event.accept()
 
     def _build_ui(self) -> None:
         root_widget = QWidget()
@@ -105,6 +121,12 @@ class MainWindow(QMainWindow):
         layout.setSpacing(20)
 
         layout.addWidget(self._build_header())
+        self._empty_state_label.setObjectName("emptyState")
+        self._empty_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_state_label.setWordWrap(True)
+        self._empty_state_label.hide()
+
+        layout.addWidget(self._empty_state_label)
         layout.addWidget(self._build_folder_controls())
         layout.addWidget(self._build_results_header())
         layout.addWidget(self._file_table)
@@ -211,6 +233,8 @@ class MainWindow(QMainWindow):
 
         self._trash_button.clicked.connect(self._move_selected_to_trash)
 
+        self._file_table.doubleClicked.connect(lambda _: self._reveal_selected_file())
+
         selection_model = self._file_table.selectionModel()
 
         if selection_model is not None:
@@ -255,6 +279,8 @@ class MainWindow(QMainWindow):
         self._duplicate_groups.clear()
         self._duplicate_analysis_complete = False
         self._scan_cancel_requested = False
+        self._reveal_button.setEnabled(False)
+        self._trash_button.setEnabled(False)
         self._file_table.clear_files()
         self._update_file_actions()
 
@@ -323,7 +349,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Scan complete — {self._scan_file_count:,} files found")
 
     def _handle_scan_failed(self, message: str) -> None:
-        self.statusBar().showMessage(f"Scan failed: {message}")
+        self.statusBar().showMessage("Scan failed")
+
+        QMessageBox.warning(
+            self,
+            "Scan Failed",
+            message or "File Haven could not scan the selected folder.",
+        )
+
+        self._update_file_actions()
 
     def _handle_scan_cancelled(self) -> None:
         self.statusBar().showMessage(f"Scan cancelled — {self._scan_file_count:,} files found")
@@ -356,7 +390,26 @@ class MainWindow(QMainWindow):
         displayed_records = records[:MAX_DISPLAYED_FILES]
 
         self._file_table.set_files(displayed_records)
-        self._update_file_actions()
+
+        if records:
+            self._empty_state_label.hide()
+            self._file_table.show()
+        else:
+            empty_messages = {
+                "all_files": "Choose and scan a folder to view its files.",
+                "duplicates": "No duplicate files were found.",
+                "large_files": "No large files were found.",
+                "old_files": "No old files were found.",
+            }
+
+            self._empty_state_label.setText(
+                empty_messages.get(
+                    self._current_page,
+                    "No files match the current view.",
+                )
+            )
+            self._empty_state_label.show()
+            self._file_table.show()
 
         if len(records) > MAX_DISPLAYED_FILES:
             self.statusBar().showMessage(
@@ -374,6 +427,8 @@ class MainWindow(QMainWindow):
         self._choose_folder_button.setEnabled(False)
         self._scan_button.setEnabled(False)
         self._cancel_button.setEnabled(False)
+        self._reveal_button.setEnabled(False)
+        self._trash_button.setEnabled(False)
 
         self._file_table.clear_files()
         self._update_file_actions()
@@ -422,7 +477,15 @@ class MainWindow(QMainWindow):
         )
 
     def _handle_duplicates_failed(self, message: str) -> None:
-        self.statusBar().showMessage(f"Duplicate detection failed: {message}")
+        self.statusBar().showMessage("Duplicate detection failed")
+
+        QMessageBox.warning(
+            self,
+            "Duplicate Detection Failed",
+            message or "File Haven could not analyze duplicate files.",
+        )
+
+        self._update_file_actions()
 
     def _cleanup_duplicate_analysis(self) -> None:
         self._duplicate_worker = None
@@ -440,22 +503,32 @@ class MainWindow(QMainWindow):
             history_records = self._history_repository.get_all()
             self._history_table.show_records(history_records)
 
-            self._update_file_actions()
+            if history_records:
+                self._empty_state_label.hide()
+                self._history_table.show()
+            else:
+                self._history_table.hide()
+                self._empty_state_label.setText("Completed folder scans will appear here.")
+                self._empty_state_label.show()
+
             self.statusBar().showMessage(f"Showing {len(history_records):,} previous scans")
+            self._update_file_actions()
             return
+
+        self._empty_state_label.hide()
 
         if self._current_page == "duplicates":
             self._history_table.hide()
             self._file_table.show()
 
             if not self._scan_results:
-                self._file_table.clear_files()
+                self._show_files([])
                 self._update_file_actions()
-                self.statusBar().showMessage("Scan a folder before finding duplicates")
                 return
 
             if not self._duplicate_analysis_complete:
                 self._start_duplicate_analysis()
+                self._update_file_actions()
                 return
 
             duplicate_records = [
@@ -474,6 +547,7 @@ class MainWindow(QMainWindow):
                 ]
 
             self._show_files(duplicate_records)
+            self._update_file_actions()
             return
 
         self._history_table.hide()
@@ -493,6 +567,7 @@ class MainWindow(QMainWindow):
             ]
 
         self._show_files(records)
+        self._update_file_actions()
 
     def _get_current_page_records(self) -> list[FileRecord]:
         if self._current_page == "duplicates":

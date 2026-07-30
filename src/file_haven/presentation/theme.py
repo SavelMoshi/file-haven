@@ -1,6 +1,6 @@
 DARK_THEME = """
 * {
-    font-family: "Inter", "SF Pro Display", "Segoe UI", sans-serif;
+    font-family: "Helvetica Neue";
     font-size: 14px;
 }
 
@@ -53,6 +53,12 @@ QLabel#pageTitle {
     color: #FFFFFF;
     font-size: 20px;
     font-weight: 650;
+}
+
+QLabel#emptyState {
+    color: #94A3B8;
+    font-size: 15px;
+    padding: 28px;
 }
 
 QFrame#controlCard {

@@ -70,6 +70,22 @@ def test_move_to_trash_button_follows_file_table_selection(
     window.close()
 
 
+def test_duplicates_empty_state_shows_without_scan_results(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _app()
+    window = _window(tmp_path, monkeypatch)
+
+    window._handle_page_selected("duplicates")
+
+    assert not window._empty_state_label.isHidden()
+    assert window._empty_state_label.text() == "No duplicate files were found."
+    assert window._file_table.records() == []
+
+    window.close()
+
+
 def test_move_selected_to_trash_updates_results_duplicates_and_reports_failures(
     tmp_path: Path,
     monkeypatch,
