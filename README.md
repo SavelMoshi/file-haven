@@ -10,6 +10,32 @@ A local-first desktop utility for finding clutter, duplicate files, large files,
 
 </div>
 
+## First Launch Security Warning
+
+File Haven is not currently signed with a paid Apple Developer or Windows code-signing certificate. Because of this, macOS or Windows may show a security warning the first time you open it.
+
+### macOS
+
+1. Try opening **File Haven.app** once.
+2. Open **System Settings**.
+3. Go to **Privacy & Security**.
+4. Scroll down to the security message about File Haven.
+5. Click **Open Anyway**.
+6. Confirm by clicking **Open**.
+
+Only bypass the warning when File Haven was downloaded from this official GitHub repository. Apple provides this override for apps from developers that macOS cannot verify.
+
+### Windows
+
+1. Extract the entire `File-Haven-Windows.zip` folder.
+2. Double-click **File Haven.exe**.
+3. If Windows displays **Windows protected your PC**, click **More info**.
+4. Click **Run anyway**.
+
+Windows may display this warning because the application is currently unsigned and has not established SmartScreen reputation.
+
+File Haven runs locally and does not upload filenames, file contents, or scan results.
+
 ## Features
 
 - Recursive folder scanning
