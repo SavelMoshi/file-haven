@@ -4,7 +4,7 @@
 
 # File Haven
 
-A local-first desktop utility for finding clutter, duplicate files, large files, and old files—without uploading your data.
+A local-first desktop utility for finding clutter, duplicate files, large files, and old files without uploading your data.
 
 [Download the latest release](../../releases/latest)
 
