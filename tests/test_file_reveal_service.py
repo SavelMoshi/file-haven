@@ -55,14 +55,20 @@ def test_uses_explorer_on_windows(
     )
     monkeypatch.setattr(
         file_reveal_service.subprocess,
-        "run",
-        lambda command, check: commands.append(command),
+        "Popen",
+        lambda command: commands.append(command),
     )
 
     result = FileRevealService().reveal(file_path)
 
     assert result is True
-    assert commands == [["explorer", f"/select,{file_path.absolute()}"]]
+    assert commands == [
+        [
+            "explorer.exe",
+            "/select,",
+            str(file_path.absolute()),
+        ]
+    ]
 
 
 def test_opens_parent_folder_on_linux(
