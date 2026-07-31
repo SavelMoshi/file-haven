@@ -17,9 +17,12 @@ class FileRevealService:
                 return self._reveal_on_macos(file_path)
 
             if sys.platform == "win32":
-                subprocess.run(
-                    ["explorer", f"/select,{file_path}"],
-                    check=True,
+                subprocess.Popen(
+                    [
+                        "explorer.exe",
+                        "/select,",
+                        str(file_path),
+                    ]
                 )
                 return True
 
